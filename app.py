@@ -12,6 +12,7 @@ from flask import Flask, render_template, request, Response
 
 app = Flask(__name__)
 
+APP_VERSION = "2026-05-21-hotfix2"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
@@ -126,7 +127,7 @@ def index():
                 data = fetch_symbol_data(code)
             except Exception as exc:
                 error = f"データ取得に失敗しました: {exc}"
-    return render_template("index.html", data=data, error=error)
+    return render_template("index.html", data=data, error=error, app_version=APP_VERSION)
 
 
 @app.route("/export_csv", methods=["POST"])

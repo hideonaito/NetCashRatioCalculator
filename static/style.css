@@ -80,3 +80,5 @@ li {
 .judge { color: #facc15; font-weight: 700; }
 .error { color: var(--danger); font-weight: 700; }
 .csv-button { margin-top: 12px; }
+
+.version { margin: 4px 0 0; font-size: 0.8rem; opacity: 0.65; }
