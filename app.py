@@ -6,13 +6,14 @@ import csv
 import json
 import re
 from urllib.parse import quote
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from flask import Flask, render_template, request, Response
 
 app = Flask(__name__)
 
-APP_VERSION = "2026-05-21-hotfix2"
+APP_VERSION = "2026-05-21-hotfix3"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
@@ -37,6 +38,20 @@ def _fetch_html(url: str) -> str:
         return res.read().decode("utf-8", errors="ignore")
 
 
+
+
+def _fetch_first_available(urls: list[str]) -> str:
+    last_error: Exception | None = None
+    for url in urls:
+        try:
+            return _fetch_html(url)
+        except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    raise ValueError("取得対象URLが不正です。")
+
 def _extract_root_app_main(html: str) -> dict:
     m = re.search(r"root\.App\.main\s*=\s*(\{.*?\});", html, re.DOTALL)
     if not m:
@@ -49,7 +64,10 @@ def fetch_symbol_data(code: str) -> dict:
     base_url = f"https://finance.yahoo.com/quote/{quote(ticker)}"
 
     # HTML中の埋め込みJSON（root.App.main）からデータを取得
-    quote_html = _fetch_html(base_url)
+    quote_html = _fetch_first_available([
+        base_url,
+        f"{base_url}?p={quote(ticker)}",
+    ])
     root_data = _extract_root_app_main(quote_html)
     store = root_data.get("context", {}).get("dispatcher", {}).get("stores", {})
 
@@ -66,7 +84,12 @@ def fetch_symbol_data(code: str) -> dict:
     shares_outstanding = _safe_raw(stats_store, ["sharesOutstanding", "raw"])
 
     # BS値がトップページで不足する場合があるため balance-sheet ページも参照
-    bs_html = _fetch_html(f"{base_url}/balance-sheet?p={quote(ticker)}")
+    bs_html = _fetch_first_available([
+        f"{base_url}/balance-sheet?p={quote(ticker)}",
+        f"{base_url}/balance-sheet/?p={quote(ticker)}",
+        f"{base_url}/balance-sheet",
+        f"{base_url}/balance-sheet/",
+    ])
     bs_root = _extract_root_app_main(bs_html)
     bs_store = bs_root.get("context", {}).get("dispatcher", {}).get("stores", {}).get("QuoteSummaryStore", {})
 
@@ -126,7 +149,7 @@ def index():
             try:
                 data = fetch_symbol_data(code)
             except Exception as exc:
-                error = f"データ取得に失敗しました: {exc}"
+                error = f"データ取得に失敗しました: {type(exc).__name__}: {exc}"
     return render_template("index.html", data=data, error=error, app_version=APP_VERSION)
 
 
@@ -139,7 +162,7 @@ def export_csv():
     try:
         data = fetch_symbol_data(code)
     except Exception as exc:
-        return Response(f"CSV出力に失敗しました: {exc}", status=400)
+        return Response(f"CSV出力に失敗しました: {type(exc).__name__}: {exc}", status=400)
 
     output = StringIO()
     writer = csv.writer(output)
