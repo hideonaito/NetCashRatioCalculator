@@ -1,0 +1,82 @@
+:root {
+  --bg: #0c111b;
+  --card: #171f2f;
+  --line: #2f3c56;
+  --text: #e6ebf5;
+  --accent: #60a5fa;
+  --danger: #f87171;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Inter, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+  background: radial-gradient(circle at top right, #1f325d, var(--bg));
+  color: var(--text);
+}
+
+.container {
+  width: min(900px, 92vw);
+  margin: 40px auto;
+}
+
+h1 { margin-bottom: 0; }
+.subtitle { margin-top: 8px; opacity: 0.75; }
+
+.search-card, .result-card {
+  background: rgba(23, 31, 47, 0.9);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 20px;
+  margin-top: 20px;
+  backdrop-filter: blur(6px);
+}
+
+.search-row {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+}
+
+input {
+  flex: 1;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #111827;
+  color: var(--text);
+}
+
+button {
+  padding: 12px 18px;
+  border-radius: 12px;
+  border: none;
+  color: white;
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.company {
+  font-size: 1.8rem;
+  margin: 0;
+}
+
+.highlight {
+  font-size: 1.25rem;
+  color: #bfdbfe;
+}
+
+ul {
+  list-style: none;
+  padding-left: 0;
+}
+
+li {
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--line);
+}
+
+.judge { color: #facc15; font-weight: 700; }
+.error { color: var(--danger); font-weight: 700; }
+.csv-button { margin-top: 12px; }
