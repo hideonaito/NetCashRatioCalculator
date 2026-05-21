@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ネットキャッシュ比率計算機</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <h1>NetCashRatioCalculator</h1>
+    <p class="subtitle">ネットキャッシュ比率計算機</p>
+
+    <form method="post" class="search-card">
+      <label for="code">証券コード</label>
+      <div class="search-row">
+        <input id="code" name="code" placeholder="例: 7203" required />
+        <button type="submit">検索</button>
+      </div>
+    </form>
+
+    {% if error %}
+      <p class="error">{{ error }}</p>
+    {% endif %}
+
+    {% if data %}
+    <section class="result-card">
+      <h2 class="company">{{ data.company_name }}</h2>
+      <p class="highlight">ネットキャッシュ比率 (NCR): <strong>{{ data.ncr_formatted }}</strong></p>
+      <ul>
+        <li>現在時刻: {{ data.timestamp }}</li>
+        <li>証券コード: {{ data.code }}</li>
+        <li>直近の株価: {{ data.price_formatted }}</li>
+        <li>流動資産: {{ data.current_assets_formatted }}</li>
+        <li>投資有価証券: {{ data.investments_formatted }}</li>
+        <li>負債: {{ data.liabilities_formatted }}</li>
+        <li>時価総額: {{ data.market_cap_formatted }}</li>
+        <li>ネットキャッシュ: {{ data.net_cash_formatted }}</li>
+        <li>判定結果: <span class="judge">{{ data.result_text }}</span></li>
+      </ul>
+      <form method="post" action="{{ url_for('export_csv') }}">
+        <input type="hidden" name="code" value="{{ data.code }}" />
+        <button type="submit" class="csv-button">CSV出力</button>
+      </form>
+    </section>
+    {% endif %}
+  </main>
+</body>
+</html>
