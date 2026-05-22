@@ -14,7 +14,7 @@ from flask import Flask, Response, render_template, request
 
 app = Flask(__name__)
 
-APP_VERSION = "2026-05-22-rebuild1"
+APP_VERSION = "2026-05-22-rebuild2"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
@@ -85,6 +85,19 @@ def _parse_irbank_value(html: str, label: str) -> float:
     return _to_number(text)
 
 
+
+
+def _extract_first_number(html: str, patterns: list[str]) -> float:
+    for pat in patterns:
+        m = re.search(pat, html, re.DOTALL)
+        if not m:
+            continue
+        try:
+            return _to_number(m.group(1))
+        except Exception:
+            continue
+    return 0.0
+
 def fetch_symbol_data(code: str) -> dict:
     ticker = f"{code}.T"
 
@@ -109,24 +122,42 @@ def fetch_symbol_data(code: str) -> dict:
         pass
 
     # fallback to Yahoo root.App.main (US page etc.)
-    if not price:
+    try:
         root = _extract_root_app_main(quote_html)
         stores = root.get("context", {}).get("dispatcher", {}).get("stores", {})
         summary = stores.get("QuoteSummaryStore", {})
         price_store = summary.get("price", {})
         stats_store = summary.get("defaultKeyStatistics", {})
         company_name = price_store.get("longName") or price_store.get("shortName") or company_name
-        price = float((price_store.get("regularMarketPrice") or {}).get("raw") or 0)
+        if not price:
+            price = float((price_store.get("regularMarketPrice") or {}).get("raw") or 0)
         shares_outstanding = float((stats_store.get("sharesOutstanding") or {}).get("raw") or 0)
         if not shares_outstanding and price:
             market_cap = float((price_store.get("marketCap") or {}).get("raw") or 0)
             shares_outstanding = market_cap / price if market_cap else 0
+    except ValueError:
+        pass
 
-    # shares outstanding from JP yahoo page text fallback
+    # HTMLテキストからの最終フォールバック
+    if not price:
+        price = _extract_first_number(
+            quote_html,
+            [
+                r'"regularMarketPrice"\s*:\s*\{\s*"raw"\s*:\s*([0-9\.]+)',
+                r'"price"\s*:\s*"([0-9,\.]+)"',
+                r'<fin-streamer[^>]*data-field="regularMarketPrice"[^>]*value="([0-9\.]+)"',
+            ],
+        )
+
     if not shares_outstanding:
-        m = re.search(r"発行済株式数[^0-9]*([0-9,]+)", quote_html)
-        if m:
-            shares_outstanding = _to_number(m.group(1))
+        shares_outstanding = _extract_first_number(
+            quote_html,
+            [
+                r"発行済株式数[^0-9]*([0-9,]+)",
+                r'"sharesOutstanding"\s*:\s*\{\s*"raw"\s*:\s*([0-9]+)',
+                r'"issuedShares"\s*:\s*"([0-9,]+)"',
+            ],
+        )
 
     if not price:
         raise ValueError("株価が取得できませんでした。")
