@@ -13,7 +13,7 @@ from flask import Flask, Response, render_template, request
 
 app = Flask(__name__)
 
-APP_VERSION = "2026-05-22-rebuild3"
+APP_VERSION = "2026-05-22-rebuild4"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
@@ -22,14 +22,9 @@ def _yen(value: float | int) -> str:
 
 
 def _to_number(value: str) -> float:
-    cleaned = (
-        value.replace(",", "")
-        .replace("円", "")
-        .replace("株", "")
-        .replace("百万円", "")
-        .replace("千円", "")
-        .strip()
-    )
+    cleaned = re.sub(r"\s+", "", value)
+    cleaned = cleaned.replace(",", "").replace("円", "").replace("株", "")
+    cleaned = cleaned.replace("△", "-").replace("▲", "-")
     if not cleaned:
         return 0.0
     return float(cleaned)
@@ -44,7 +39,7 @@ def _fetch_html(url: str) -> str:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
     )
-    with urlopen(req, timeout=20) as res:
+    with urlopen(req, timeout=25) as res:
         return res.read().decode("utf-8", errors="ignore")
 
 
@@ -89,16 +84,56 @@ def _extract_company_name(html: str, code: str) -> str:
     return f"{code}.T"
 
 
-def _parse_irbank_value(html: str, label: str) -> float:
-    pattern = rf"<th[^>]*>\s*{re.escape(label)}\s*</th>\s*<td[^>]*>(.*?)</td>"
-    m = re.search(pattern, html, re.DOTALL)
-    if not m:
-        return 0.0
-    text = re.sub(r"<.*?>", "", m.group(1))
-    text = unescape(text).strip()
-    if not text or text == "-":
-        return 0.0
-    return _to_number(text)
+def _extract_irbank_multiplier(html: str) -> int:
+    if re.search(r"単位[:：]\s*百万円", html):
+        return 1_000_000
+    if re.search(r"単位[:：]\s*千円", html):
+        return 1_000
+    if re.search(r"単位[:：]\s*円", html):
+        return 1
+    return 1_000_000
+
+
+def _parse_irbank_value(html: str, labels: list[str], multiplier: int) -> float:
+    for label in labels:
+        pattern = rf"<th[^>]*>\s*{re.escape(label)}\s*</th>\s*<td[^>]*>(.*?)</td>"
+        m = re.search(pattern, html, re.DOTALL)
+        if not m:
+            continue
+        text = re.sub(r"<.*?>", "", m.group(1))
+        text = unescape(text).strip()
+        if not text or text == "-":
+            continue
+        try:
+            return _to_number(text) * multiplier
+        except ValueError:
+            continue
+    return 0.0
+
+
+def _fetch_irbank_financials(code: str) -> tuple[float, float, float]:
+    candidates = [
+        f"https://irbank.net/{code}",
+        f"https://irbank.net/{code}?f=S",
+        f"https://irbank.net/{code}/results",
+        f"https://irbank.net/{code}/financial",
+    ]
+    last_error = None
+    for url in candidates:
+        try:
+            html = _fetch_html(url)
+            multiplier = _extract_irbank_multiplier(html)
+            current_assets = _parse_irbank_value(html, ["流動資産", "流動資産合計"], multiplier)
+            investments = _parse_irbank_value(html, ["投資有価証券", "投資その他の資産"], multiplier)
+            liabilities = _parse_irbank_value(html, ["負債合計", "負債の部合計", "負債"], multiplier)
+            if current_assets > 0 and liabilities > 0:
+                return current_assets, investments, liabilities
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise ValueError(f"IR BANKから主要財務データを取得できませんでした: {last_error}")
+    raise ValueError("IR BANKから主要財務データを取得できませんでした。")
 
 
 def fetch_symbol_data(code: str) -> dict:
@@ -108,7 +143,6 @@ def fetch_symbol_data(code: str) -> dict:
         f"https://finance.yahoo.co.jp/quote/{quote(ticker)}",
         f"https://kabutan.jp/stock/?code={code}",
         f"https://finance.yahoo.com/quote/{quote(ticker)}",
-        f"https://finance.yahoo.com/quote/{quote(ticker)}?p={quote(ticker)}",
     ])
 
     company_name = _extract_company_name(quote_html, code)
@@ -133,15 +167,13 @@ def fetch_symbol_data(code: str) -> dict:
         ],
     )
 
-    # sharesが取れない場合はIR BANKから補完
-    ir_html = _fetch_first_available([
+    ir_html_for_shares = _fetch_first_available([
         f"https://irbank.net/{code}",
         f"https://irbank.net/{code}?f=S",
     ])
-
     if not shares_outstanding:
         shares_outstanding = _extract_first_number(
-            ir_html,
+            ir_html_for_shares,
             [
                 r"発行済株式総数[^0-9]{0,40}([0-9,]+)",
                 r"発行済株式数[^0-9]{0,40}([0-9,]+)",
@@ -153,12 +185,7 @@ def fetch_symbol_data(code: str) -> dict:
     if not shares_outstanding:
         raise ValueError("発行済株式数が取得できませんでした。")
 
-    current_assets = _parse_irbank_value(ir_html, "流動資産") * 1_000_000
-    investments = _parse_irbank_value(ir_html, "投資有価証券") * 1_000_000
-    liabilities = _parse_irbank_value(ir_html, "負債合計") * 1_000_000
-
-    if current_assets <= 0 and liabilities <= 0:
-        raise ValueError("IR BANKから主要財務データを取得できませんでした。")
+    current_assets, investments, liabilities = _fetch_irbank_financials(code)
 
     market_cap = price * shares_outstanding
     net_cash = current_assets + (investments * 0.7) - liabilities
