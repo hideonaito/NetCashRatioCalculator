@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from html import unescape
 from io import StringIO
 import csv
-import json
 import re
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -14,12 +13,26 @@ from flask import Flask, Response, render_template, request
 
 app = Flask(__name__)
 
-APP_VERSION = "2026-05-22-rebuild2"
+APP_VERSION = "2026-05-22-rebuild3"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
 def _yen(value: float | int) -> str:
     return f"{int(round(value)):,}円"
+
+
+def _to_number(value: str) -> float:
+    cleaned = (
+        value.replace(",", "")
+        .replace("円", "")
+        .replace("株", "")
+        .replace("百万円", "")
+        .replace("千円", "")
+        .strip()
+    )
+    if not cleaned:
+        return 0.0
+    return float(cleaned)
 
 
 def _fetch_html(url: str) -> str:
@@ -45,32 +58,35 @@ def _fetch_first_available(urls: list[str]) -> str:
     raise ValueError("候補URLの取得にすべて失敗しました: " + " | ".join(errors))
 
 
-def _extract_json_ld(html: str) -> dict:
-    scripts = re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
-    for raw in scripts:
-        text = unescape(raw.strip())
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
+def _extract_first_number(html: str, patterns: list[str]) -> float:
+    for pattern in patterns:
+        m = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
+        if not m:
             continue
-        if isinstance(data, dict) and data.get("@type") in {"WebPage", "Organization", "Product"}:
-            if "mainEntity" in data:
-                return data
-        if isinstance(data, dict) and data.get("@type") == "Product":
-            return data
-    raise ValueError("株価のJSON-LD解析に失敗しました。")
+        text = unescape(m.group(1))
+        text = re.sub(r"<.*?>", "", text)
+        try:
+            return _to_number(text)
+        except ValueError:
+            continue
+    return 0.0
 
 
-def _extract_root_app_main(html: str) -> dict:
-    m = re.search(r"root\.App\.main\s*=\s*(\{.*?\});", html, re.DOTALL)
-    if not m:
-        raise ValueError("Yahoo埋め込みデータの解析に失敗しました。")
-    return json.loads(m.group(1))
-
-
-def _to_number(value: str) -> float:
-    cleaned = value.replace(",", "").replace("円", "").replace("百万円", "").replace("千円", "").strip()
-    return float(cleaned)
+def _extract_company_name(html: str, code: str) -> str:
+    patterns = [
+        r"<title>\s*([^<\-｜\|]+?)[\-｜\|]",
+        r'"name"\s*:\s*"([^"]+?)"',
+        r"<h1[^>]*>(.*?)</h1>",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
+        if not m:
+            continue
+        text = unescape(re.sub(r"<.*?>", "", m.group(1))).strip()
+        text = re.sub(r"\s+", " ", text)
+        if text and len(text) < 80:
+            return text
+    return f"{code}.T"
 
 
 def _parse_irbank_value(html: str, label: str) -> float:
@@ -85,77 +101,50 @@ def _parse_irbank_value(html: str, label: str) -> float:
     return _to_number(text)
 
 
-
-
-def _extract_first_number(html: str, patterns: list[str]) -> float:
-    for pat in patterns:
-        m = re.search(pat, html, re.DOTALL)
-        if not m:
-            continue
-        try:
-            return _to_number(m.group(1))
-        except Exception:
-            continue
-    return 0.0
-
 def fetch_symbol_data(code: str) -> dict:
     ticker = f"{code}.T"
 
     quote_html = _fetch_first_available([
         f"https://finance.yahoo.co.jp/quote/{quote(ticker)}",
+        f"https://kabutan.jp/stock/?code={code}",
         f"https://finance.yahoo.com/quote/{quote(ticker)}",
         f"https://finance.yahoo.com/quote/{quote(ticker)}?p={quote(ticker)}",
     ])
 
-    company_name = f"{code}.T"
-    price = 0.0
-    shares_outstanding = 0.0
+    company_name = _extract_company_name(quote_html, code)
 
-    # try JP Yahoo JSON-LD first
-    try:
-        ld = _extract_json_ld(quote_html)
-        candidate = ld.get("mainEntity", ld)
-        company_name = candidate.get("name") or company_name
-        offers = candidate.get("offers") or {}
-        price = float(offers.get("price") or 0)
-    except Exception:
-        pass
+    price = _extract_first_number(
+        quote_html,
+        [
+            r'<span[^>]*class="[^"]*\b_3rXWJKZF\b[^"]*"[^>]*>([0-9,\.]+)</span>',
+            r'"regularMarketPrice"\s*:\s*\{\s*"raw"\s*:\s*([0-9\.]+)',
+            r'<fin-streamer[^>]*data-field="regularMarketPrice"[^>]*value="([0-9\.]+)"',
+            r'現在値[^0-9]{0,20}([0-9,]+)',
+            r'株価[^0-9]{0,20}([0-9,]+)',
+        ],
+    )
 
-    # fallback to Yahoo root.App.main (US page etc.)
-    try:
-        root = _extract_root_app_main(quote_html)
-        stores = root.get("context", {}).get("dispatcher", {}).get("stores", {})
-        summary = stores.get("QuoteSummaryStore", {})
-        price_store = summary.get("price", {})
-        stats_store = summary.get("defaultKeyStatistics", {})
-        company_name = price_store.get("longName") or price_store.get("shortName") or company_name
-        if not price:
-            price = float((price_store.get("regularMarketPrice") or {}).get("raw") or 0)
-        shares_outstanding = float((stats_store.get("sharesOutstanding") or {}).get("raw") or 0)
-        if not shares_outstanding and price:
-            market_cap = float((price_store.get("marketCap") or {}).get("raw") or 0)
-            shares_outstanding = market_cap / price if market_cap else 0
-    except ValueError:
-        pass
+    shares_outstanding = _extract_first_number(
+        quote_html,
+        [
+            r"発行済株式数[^0-9]{0,30}([0-9,]+)",
+            r'"sharesOutstanding"\s*:\s*\{\s*"raw"\s*:\s*([0-9]+)',
+            r'発行済株式総数[^0-9]{0,30}([0-9,]+)',
+        ],
+    )
 
-    # HTMLテキストからの最終フォールバック
-    if not price:
-        price = _extract_first_number(
-            quote_html,
-            [
-                r'"regularMarketPrice"\s*:\s*\{\s*"raw"\s*:\s*([0-9\.]+)',
-                r'"price"\s*:\s*"([0-9,\.]+)"',
-                r'<fin-streamer[^>]*data-field="regularMarketPrice"[^>]*value="([0-9\.]+)"',
-            ],
-        )
+    # sharesが取れない場合はIR BANKから補完
+    ir_html = _fetch_first_available([
+        f"https://irbank.net/{code}",
+        f"https://irbank.net/{code}?f=S",
+    ])
 
     if not shares_outstanding:
         shares_outstanding = _extract_first_number(
-            quote_html,
+            ir_html,
             [
-                r"発行済株式数[^0-9]*([0-9,]+)",
-                r'"sharesOutstanding"\s*:\s*\{\s*"raw"\s*:\s*([0-9]+)',
-                r'"issuedShares"\s*:\s*"([0-9,]+)"',
+                r"発行済株式総数[^0-9]{0,40}([0-9,]+)",
+                r"発行済株式数[^0-9]{0,40}([0-9,]+)",
             ],
         )
 
@@ -163,12 +152,6 @@ def fetch_symbol_data(code: str) -> dict:
         raise ValueError("株価が取得できませんでした。")
     if not shares_outstanding:
         raise ValueError("発行済株式数が取得できませんでした。")
-
-    # Financial values from IR BANK (reliable Japanese financial statement site)
-    ir_html = _fetch_first_available([
-        f"https://irbank.net/{code}",
-        f"https://irbank.net/{code}?f=S",
-    ])
 
     current_assets = _parse_irbank_value(ir_html, "流動資産") * 1_000_000
     investments = _parse_irbank_value(ir_html, "投資有価証券") * 1_000_000
