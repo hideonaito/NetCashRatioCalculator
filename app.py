@@ -13,7 +13,7 @@ from flask import Flask, Response, render_template, request
 
 app = Flask(__name__)
 
-APP_VERSION = "2026-05-22-rebuild4"
+APP_VERSION = "2026-05-22-rebuild5"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
@@ -111,6 +111,23 @@ def _parse_irbank_value(html: str, labels: list[str], multiplier: int) -> float:
     return 0.0
 
 
+
+
+def _parse_table_value(html: str, labels: list[str], multiplier: int = 1) -> float:
+    for label in labels:
+        pattern = rf"(?:<th[^>]*>|<dt[^>]*>)\s*{re.escape(label)}\s*(?:</th>|</dt>)\s*(?:<td[^>]*>|<dd[^>]*>)(.*?)(?:</td>|</dd>)"
+        m = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
+        if not m:
+            continue
+        text = re.sub(r"<.*?>", "", unescape(m.group(1))).strip()
+        if not text or text == "-":
+            continue
+        try:
+            return _to_number(text) * multiplier
+        except ValueError:
+            continue
+    return 0.0
+
 def _fetch_irbank_financials(code: str) -> tuple[float, float, float]:
     candidates = [
         f"https://irbank.net/{code}",
@@ -135,6 +152,30 @@ def _fetch_irbank_financials(code: str) -> tuple[float, float, float]:
         raise ValueError(f"IR BANKから主要財務データを取得できませんでした: {last_error}")
     raise ValueError("IR BANKから主要財務データを取得できませんでした。")
 
+
+
+
+def _fetch_kabutan_financials(code: str) -> tuple[float, float, float]:
+    urls = [
+        f"https://kabutan.jp/stock/finance?code={code}",
+        f"https://kabutan.jp/stock/?code={code}",
+    ]
+    last_error: Exception | None = None
+    for url in urls:
+        try:
+            html = _fetch_html(url)
+            multiplier = 1_000_000 if re.search(r"単位[:：]\s*百万円", html) else 1
+            current_assets = _parse_table_value(html, ["流動資産", "流動資産合計"], multiplier)
+            investments = _parse_table_value(html, ["投資有価証券", "投資その他の資産"], multiplier)
+            liabilities = _parse_table_value(html, ["負債合計", "負債", "負債の部合計"], multiplier)
+            if current_assets > 0 and liabilities > 0:
+                return current_assets, investments, liabilities
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise ValueError(f"Kabutanから主要財務データを取得できませんでした: {last_error}")
+    raise ValueError("Kabutanから主要財務データを取得できませんでした。")
 
 def fetch_symbol_data(code: str) -> dict:
     ticker = f"{code}.T"
@@ -185,7 +226,10 @@ def fetch_symbol_data(code: str) -> dict:
     if not shares_outstanding:
         raise ValueError("発行済株式数が取得できませんでした。")
 
-    current_assets, investments, liabilities = _fetch_irbank_financials(code)
+    try:
+        current_assets, investments, liabilities = _fetch_irbank_financials(code)
+    except ValueError:
+        current_assets, investments, liabilities = _fetch_kabutan_financials(code)
 
     market_cap = price * shares_outstanding
     net_cash = current_assets + (investments * 0.7) - liabilities
